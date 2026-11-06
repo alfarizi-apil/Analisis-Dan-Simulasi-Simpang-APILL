@@ -36,36 +36,45 @@ def hitung_waktu_siklus(hijau, kuning, semua_merah):
     return sum(h + kuning + semua_merah for h in hijau)
 
 
-def bangun_html_animasi(hijau, kuning, semua_merah, volume, p_kiri=0.25, p_kanan=0.25):
+def bangun_html_animasi(hijau, kuning, semua_merah, volume, p_kiri=0.25, p_kanan=0.25, aktif=None):
     """
     Membangun string HTML animasi simpang.
 
-    Param : hijau       -> list 4 nilai waktu hijau (detik) urutan U, T, S, B
+    Param : hijau       -> list waktu hijau (detik), satu nilai per pendekat AKTIF
+                           (urutan U, T, S, B; jumlahnya sama dengan len(aktif))
             kuning      -> waktu kuning (detik)
             semua_merah -> waktu semua merah / all-red (detik)
-            volume      -> dict {"U": {"MC":..,"LV":..,"HV":..}, "T": ..., "S": ..., "B": ...}
-                           dalam kendaraan/jam
+            volume      -> dict {"U": {"MC":..,"LV":..,"HV":..}, ...} dalam kendaraan/jam
+                           (cukup berisi pendekat aktif)
             p_kiri      -> proporsi kendaraan belok kiri (0-1)
             p_kanan     -> proporsi kendaraan belok kanan (0-1)
+            aktif       -> list kode pendekat yang ada, mis. ["U", "S", "B"] untuk simpang 3
+                           lengan. Default None = keempat lengan (U, T, S, B).
     Return: string HTML siap dipakai di streamlit.components.v1.html()
     """
-    if len(hijau) != 4:
-        raise ValueError("Waktu hijau harus berisi 4 nilai (U, T, S, B).")
+    aktif = [k for k in URUTAN_PENDEKAT if (aktif is None or k in aktif)]
+    if len(aktif) not in (3, 4):
+        raise ValueError("Simpang harus memiliki 3 atau 4 lengan.")
+    if len(hijau) != len(aktif):
+        raise ValueError("Jumlah nilai waktu hijau harus sama dengan jumlah pendekat aktif.")
     if p_kiri < 0 or p_kanan < 0 or p_kiri + p_kanan > 1:
         raise ValueError("Proporsi belok kiri + kanan harus antara 0 dan 1.")
 
+    hijau4, volume4 = [], []
+    for k in URUTAN_PENDEKAT:                      # susun ulang ke 4 slot (lengan tak ada = 0)
+        if k in aktif:
+            hijau4.append(float(hijau[aktif.index(k)]))
+            volume4.append({t: float(volume[k][t]) for t in ("MC", "LV", "HV")})
+        else:
+            hijau4.append(0.0)
+            volume4.append({"MC": 0.0, "LV": 0.0, "HV": 0.0})
+
     config = {
-        "hijau": [float(h) for h in hijau],
+        "aktif": [URUTAN_PENDEKAT.index(k) for k in aktif],
+        "hijau": hijau4,
         "kuning": float(kuning),
         "semuaMerah": float(semua_merah),
-        "volume": [
-            {
-                "MC": float(volume[k]["MC"]),
-                "LV": float(volume[k]["LV"]),
-                "HV": float(volume[k]["HV"]),
-            }
-            for k in URUTAN_PENDEKAT
-        ],
+        "volume": volume4,
         "pKiri": float(p_kiri),
         "pKanan": float(p_kanan),
     }
@@ -150,25 +159,30 @@ _TEMPLATE_HTML = r"""
   const COL = { lurus: "#f59e0b", kiri: "#ef4444", kanan: "#22c55e" };
 
   // ---------------- Jadwal sinyal ----------------
-  const G = CFG.hijau, Y = CFG.kuning, AR = CFG.semuaMerah;
+  const ACT = CFG.aktif;                       // indeks lengan yang ada (0=U, 1=T, 2=S, 3=B)
+  const ACTSET = new Set(ACT);
+  const NP = ACT.length;                       // jumlah fase = jumlah lengan
+  const G = ACT.map(k => CFG.hijau[k]), Y = CFG.kuning, AR = CFG.semuaMerah;   // hijau per fase
   const starts = []; let cyc = 0;
-  for (let i = 0; i < 4; i++) { starts.push(cyc); cyc += G[i] + Y + AR; }
+  for (let i = 0; i < NP; i++) { starts.push(cyc); cyc += G[i] + Y + AR; }
 
   function signal(t) {
     const tc = ((t % cyc) + cyc) % cyc;
-    let ph = 0;
-    for (let i = 3; i >= 0; i--) { if (tc >= starts[i]) { ph = i; break; } }
-    const off = tc - starts[ph];
+    let p = 0;
+    for (let i = NP - 1; i >= 0; i--) { if (tc >= starts[i]) { p = i; break; } }
+    const off = tc - starts[p];
     let sub, rem;
-    if (off < G[ph]) { sub = "G"; rem = G[ph] - off; }
-    else if (off < G[ph] + Y) { sub = "Y"; rem = G[ph] + Y - off; }
-    else { sub = "AR"; rem = G[ph] + Y + AR - off; }
+    if (off < G[p]) { sub = "G"; rem = G[p] - off; }
+    else if (off < G[p] + Y) { sub = "Y"; rem = G[p] + Y - off; }
+    else { sub = "AR"; rem = G[p] + Y + AR - off; }
     const st = [], cd = [];
     for (let k = 0; k < 4; k++) {
-      if (k === ph && sub !== "AR") { st.push(sub); cd.push(rem); }
-      else { st.push("R"); cd.push((starts[k] - tc + cyc) % cyc); }
+      const pi = ACT.indexOf(k);
+      if (pi < 0) { st.push("R"); cd.push(9999); continue; }       // lengan tidak ada
+      if (pi === p && sub !== "AR") { st.push(sub); cd.push(rem); }
+      else { st.push("R"); cd.push((starts[pi] - tc + cyc) % cyc); }
     }
-    return { ph, sub, rem, st, cd, tc };
+    return { ph: ACT[p], sub, rem, st, cd, tc };
   }
 
   // ---------------- Lintasan kendaraan ----------------
@@ -218,9 +232,19 @@ _TEMPLATE_HTML = r"""
   // ---------------- State simulasi ----------------
   let cars = [], pending = [[], [], [], []], passed = [0, 0, 0, 0], t = 0, uid = 0;
 
+  // Pilih arah: hanya ke lengan tujuan yang ada (simpang 3 lengan: tidak ada belok ke lengan kosong)
+  function pickTurn(k) {
+    const opts = [["lurus", 1 - CFG.pKiri - CFG.pKanan], ["kiri", CFG.pKiri], ["kanan", CFG.pKanan]]
+      .filter(o => ACTSET.has(PATHS[k][o[0]].m));
+    let sum = 0; for (const o of opts) sum += o[1];
+    if (sum <= 0) return opts[Math.floor(Math.random() * opts.length)][0];
+    let r = Math.random() * sum;
+    for (const o of opts) { r -= o[1]; if (r <= 0) return o[0]; }
+    return opts[opts.length - 1][0];
+  }
+
   function newCar(k, type) {
-    const r = Math.random();
-    const turn = r < CFG.pKiri ? "kiri" : (r < CFG.pKiri + CFG.pKanan ? "kanan" : "lurus");
+    const turn = pickTurn(k);
     const T = TYPES[type];
     const path = PATHS[k][turn];
     const p = path.pos(0);
@@ -329,13 +353,15 @@ _TEMPLATE_HTML = r"""
   }
 
   function drawRoad() {
-    ctx.fillStyle = "#1f2937"; ctx.fillRect(0, 0, N, N);
-    ctx.fillStyle = "#2b3544";
-    for (const [x, y] of [[0, 0], [C + HW, 0], [0, C + HW], [C + HW, C + HW]]) ctx.fillRect(x, y, C - HW, C - HW);
+    ctx.fillStyle = "#2b3544"; ctx.fillRect(0, 0, N, N);
     ctx.fillStyle = "#4b5563";
-    ctx.fillRect(C - HW, 0, 2 * HW, N);
-    ctx.fillRect(0, C - HW, N, 2 * HW);
-    for (let k = 0; k < 4; k++) {
+    ctx.fillRect(C - HW, C - HW, 2 * HW, 2 * HW);                 // kotak simpang
+    for (const k of ACT) {                                         // lengan jalan yang ada
+      const o = OUT[k];
+      if (o[1] !== 0) ctx.fillRect(C - HW, o[1] < 0 ? 0 : C, 2 * HW, C);
+      else ctx.fillRect(o[0] < 0 ? 0 : C, C - HW, C, 2 * HW);
+    }
+    for (const k of ACT) {
       ctx.save(); ctx.translate(C, C); ctx.rotate(k * Math.PI / 2);
       ctx.fillStyle = "#fbbf24";                                   // garis tengah
       for (let y = -(STOP_D + 8); y > -C; y -= 18) ctx.fillRect(-1, y - 10, 2, 10);
@@ -346,7 +372,7 @@ _TEMPLATE_HTML = r"""
     }
     // label pendekat
     ctx.font = "bold 15px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    for (let k = 0; k < 4; k++) {
+    for (const k of ACT) {
       const o = OUT[k], h = [-o[0], -o[1]], l = [h[1], -h[0]];
       const x = C + o[0] * (C - 26) + l[0] * LANE, y = C + o[1] * (C - 26) + l[1] * LANE;
       ctx.fillStyle = "rgba(17,24,39,.75)"; ctx.beginPath(); ctx.arc(x, y, 12, 0, 6.2832); ctx.fill();
@@ -406,12 +432,12 @@ _TEMPLATE_HTML = r"""
     const W = tl.width, Hh = tl.height, x0 = 22, rowH = 20, y0 = 6, sc = (W - x0 - 4) / cyc;
     tctx.clearRect(0, 0, W, Hh);
     tctx.font = "bold 11px system-ui, sans-serif"; tctx.textAlign = "left"; tctx.textBaseline = "middle";
-    for (let k = 0; k < 4; k++) {
-      const y = y0 + k * (rowH + 4);
+    for (let i = 0; i < NP; i++) {
+      const y = y0 + i * (rowH + 4);
       tctx.fillStyle = "#ef4444"; tctx.fillRect(x0, y, cyc * sc, rowH);
-      tctx.fillStyle = "#22c55e"; tctx.fillRect(x0 + starts[k] * sc, y, G[k] * sc, rowH);
-      tctx.fillStyle = "#fbbf24"; tctx.fillRect(x0 + (starts[k] + G[k]) * sc, y, Y * sc, rowH);
-      tctx.fillStyle = "#e5e7eb"; tctx.fillText(LBL[k], 5, y + rowH / 2);
+      tctx.fillStyle = "#22c55e"; tctx.fillRect(x0 + starts[i] * sc, y, G[i] * sc, rowH);
+      tctx.fillStyle = "#fbbf24"; tctx.fillRect(x0 + (starts[i] + G[i]) * sc, y, Y * sc, rowH);
+      tctx.fillStyle = "#e5e7eb"; tctx.fillText(LBL[ACT[i]], 5, y + rowH / 2);
     }
     tctx.fillStyle = "#ffffff"; tctx.fillRect(x0 + tc * sc - 1, 2, 2, Hh - 4);
   }
@@ -420,7 +446,7 @@ _TEMPLATE_HTML = r"""
     const sg = signal(t);
     drawRoad();
     for (const c of cars) drawCar(c);
-    for (let k = 0; k < 4; k++) drawSignal(k, sg.st[k], sg.cd[k]);
+    for (const k of ACT) drawSignal(k, sg.st[k], sg.cd[k]);
     ctx.font = "12px system-ui, sans-serif"; ctx.textAlign = "left"; ctx.fillStyle = "#9ca3af";
     ctx.fillText("t = " + Math.floor(t) + " d", 10, 16);
     drawTimeline(sg.tc);
@@ -429,23 +455,23 @@ _TEMPLATE_HTML = r"""
 
   // ---------------- Panel info ----------------
   const tb = document.getElementById("tb");
-  const rows = [];
-  for (let k = 0; k < 4; k++) {
+  const rows = {};
+  for (const k of ACT) {
     const tr = document.createElement("tr");
     const q = CFG.volume[k].MC + CFG.volume[k].LV + CFG.volume[k].HV;
     tr.innerHTML = "<td><b>" + LBL[k] + "</b></td><td><span class='dot'></span></td><td></td><td>" + Math.round(q) + "</td><td></td><td></td>";
-    tb.appendChild(tr); rows.push(tr.children);
+    tb.appendChild(tr); rows[k] = tr.children;
   }
   document.getElementById("info").innerHTML =
     "Hijau tiap fase: " + G.map(v => Math.round(v * 10) / 10).join(" / ") + " d &middot; Kuning " + Y + " d &middot; Semua merah " + AR + " d<br>" +
-    "<b>Siklus simulasi = " + Math.round(cyc * 10) / 10 + " detik</b> (4 fase berurutan U &rarr; T &rarr; S &rarr; B)";
+    "<b>Siklus simulasi = " + Math.round(cyc * 10) / 10 + " detik</b> (" + NP + " fase berurutan " + ACT.map(k => LBL[k]).join(" &rarr; ") + ")";
 
   const SUBTXT = { G: "HIJAU", Y: "KUNING", AR: "SEMUA MERAH" };
   const DOTC = { G: "#22c55e", Y: "#fbbf24", R: "#ef4444" };
   function updateHud(sg) {
     document.getElementById("status").textContent =
       "Fase aktif: Pendekat " + LBL[sg.ph] + " - " + SUBTXT[sg.sub] + " (" + Math.ceil(sg.rem) + " d)";
-    for (let k = 0; k < 4; k++) {
+    for (const k of ACT) {
       const cells = rows[k];
       cells[1].firstChild.style.background = DOTC[sg.st[k]];
       cells[2].textContent = sg.cd[k] < 1000 ? Math.ceil(sg.cd[k]) : "--";
@@ -489,3 +515,4 @@ if __name__ == "__main__":
     with open("uji_animasi.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("Tersimpan: uji_animasi.html | siklus =", hitung_waktu_siklus([35] * 4, 3, 2), "detik")
+    
