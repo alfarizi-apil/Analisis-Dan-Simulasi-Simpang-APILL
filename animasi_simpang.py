@@ -23,17 +23,28 @@ import json
 URUTAN_PENDEKAT = ["U", "T", "S", "B"]
 
 
+def _ke_list(nilai, n):
+    """Ubah angka tunggal menjadi list n nilai; list dikembalikan apa adanya."""
+    if isinstance(nilai, (list, tuple)):
+        if len(nilai) != n:
+            raise ValueError("Panjang daftar nilai harus sama dengan jumlah pendekat aktif.")
+        return [float(v) for v in nilai]
+    return [float(nilai)] * n
+
+
 def hitung_waktu_siklus(hijau, kuning, semua_merah):
     """
-    Menghitung waktu siklus simulasi untuk 4 fase berurutan.
+    Menghitung waktu siklus untuk fase berurutan (satu pendekat = satu fase).
 
-    Rumus : siklus = sum(hijau_i + kuning + semua_merah) untuk 4 pendekat
-    Param : hijau       -> list 4 nilai waktu hijau (detik) urutan U, T, S, B
-            kuning      -> waktu kuning tiap fase (detik)
-            semua_merah -> waktu semua merah tiap fase (detik)
+    Rumus : siklus = sum(hijau_i + kuning_i + semua_merah_i)
+    Param : hijau       -> list waktu hijau (detik) tiap fase
+            kuning      -> angka tunggal atau list (detik) tiap fase
+            semua_merah -> angka tunggal atau list (detik) tiap fase
     Return: waktu siklus total (detik)
     """
-    return sum(h + kuning + semua_merah for h in hijau)
+    n = len(hijau)
+    ky, sm = _ke_list(kuning, n), _ke_list(semua_merah, n)
+    return sum(h + a + b for h, a, b in zip(hijau, ky, sm))
 
 
 def bangun_html_animasi(hijau, kuning, semua_merah, volume, p_kiri=0.25, p_kanan=0.25, aktif=None):
@@ -42,12 +53,12 @@ def bangun_html_animasi(hijau, kuning, semua_merah, volume, p_kiri=0.25, p_kanan
 
     Param : hijau       -> list waktu hijau (detik), satu nilai per pendekat AKTIF
                            (urutan U, T, S, B; jumlahnya sama dengan len(aktif))
-            kuning      -> waktu kuning (detik)
-            semua_merah -> waktu semua merah / all-red (detik)
+            kuning      -> waktu kuning (detik): angka tunggal atau list per pendekat aktif
+            semua_merah -> waktu semua merah (detik): angka tunggal atau list per pendekat aktif
             volume      -> dict {"U": {"MC":..,"LV":..,"HV":..}, ...} dalam kendaraan/jam
                            (cukup berisi pendekat aktif)
-            p_kiri      -> proporsi kendaraan belok kiri (0-1)
-            p_kanan     -> proporsi kendaraan belok kanan (0-1)
+            p_kiri      -> proporsi belok kiri (0-1): angka tunggal atau list per pendekat aktif
+            p_kanan     -> proporsi belok kanan (0-1): angka tunggal atau list per pendekat aktif
             aktif       -> list kode pendekat yang ada, mis. ["U", "S", "B"] untuk simpang 3
                            lengan. Default None = keempat lengan (U, T, S, B).
     Return: string HTML siap dipakai di streamlit.components.v1.html()
@@ -57,26 +68,32 @@ def bangun_html_animasi(hijau, kuning, semua_merah, volume, p_kiri=0.25, p_kanan
         raise ValueError("Simpang harus memiliki 3 atau 4 lengan.")
     if len(hijau) != len(aktif):
         raise ValueError("Jumlah nilai waktu hijau harus sama dengan jumlah pendekat aktif.")
-    if p_kiri < 0 or p_kanan < 0 or p_kiri + p_kanan > 1:
-        raise ValueError("Proporsi belok kiri + kanan harus antara 0 dan 1.")
+    n = len(aktif)
+    kuning_l, merah_l = _ke_list(kuning, n), _ke_list(semua_merah, n)
+    kiri_l, kanan_l = _ke_list(p_kiri, n), _ke_list(p_kanan, n)
+    for a, b in zip(kiri_l, kanan_l):
+        if a < 0 or b < 0 or a + b > 1.0001:
+            raise ValueError("Proporsi belok kiri + kanan harus antara 0 dan 1.")
 
-    hijau4, volume4 = [], []
+    hijau4, kuning4, merah4, kiri4, kanan4, volume4 = [], [], [], [], [], []
     for k in URUTAN_PENDEKAT:                      # susun ulang ke 4 slot (lengan tak ada = 0)
         if k in aktif:
-            hijau4.append(float(hijau[aktif.index(k)]))
+            i = aktif.index(k)
+            hijau4.append(float(hijau[i])); kuning4.append(kuning_l[i]); merah4.append(merah_l[i])
+            kiri4.append(kiri_l[i]); kanan4.append(kanan_l[i])
             volume4.append({t: float(volume[k][t]) for t in ("MC", "LV", "HV")})
         else:
-            hijau4.append(0.0)
+            hijau4.append(0.0); kuning4.append(0.0); merah4.append(0.0); kiri4.append(0.0); kanan4.append(0.0)
             volume4.append({"MC": 0.0, "LV": 0.0, "HV": 0.0})
 
     config = {
         "aktif": [URUTAN_PENDEKAT.index(k) for k in aktif],
         "hijau": hijau4,
-        "kuning": float(kuning),
-        "semuaMerah": float(semua_merah),
+        "kuning": kuning4,
+        "semuaMerah": merah4,
         "volume": volume4,
-        "pKiri": float(p_kiri),
-        "pKanan": float(p_kanan),
+        "pKiri": kiri4,
+        "pKanan": kanan4,
     }
     return _TEMPLATE_HTML.replace("__CONFIG__", json.dumps(config))
 
@@ -162,9 +179,11 @@ _TEMPLATE_HTML = r"""
   const ACT = CFG.aktif;                       // indeks lengan yang ada (0=U, 1=T, 2=S, 3=B)
   const ACTSET = new Set(ACT);
   const NP = ACT.length;                       // jumlah fase = jumlah lengan
-  const G = ACT.map(k => CFG.hijau[k]), Y = CFG.kuning, AR = CFG.semuaMerah;   // hijau per fase
+  const G = ACT.map(k => CFG.hijau[k]);          // hijau tiap fase
+  const Y = ACT.map(k => CFG.kuning[k]);         // kuning tiap fase
+  const AR = ACT.map(k => CFG.semuaMerah[k]);    // semua merah tiap fase
   const starts = []; let cyc = 0;
-  for (let i = 0; i < NP; i++) { starts.push(cyc); cyc += G[i] + Y + AR; }
+  for (let i = 0; i < NP; i++) { starts.push(cyc); cyc += G[i] + Y[i] + AR[i]; }
 
   function signal(t) {
     const tc = ((t % cyc) + cyc) % cyc;
@@ -173,8 +192,8 @@ _TEMPLATE_HTML = r"""
     const off = tc - starts[p];
     let sub, rem;
     if (off < G[p]) { sub = "G"; rem = G[p] - off; }
-    else if (off < G[p] + Y) { sub = "Y"; rem = G[p] + Y - off; }
-    else { sub = "AR"; rem = G[p] + Y + AR - off; }
+    else if (off < G[p] + Y[p]) { sub = "Y"; rem = G[p] + Y[p] - off; }
+    else { sub = "AR"; rem = G[p] + Y[p] + AR[p] - off; }
     const st = [], cd = [];
     for (let k = 0; k < 4; k++) {
       const pi = ACT.indexOf(k);
@@ -234,7 +253,7 @@ _TEMPLATE_HTML = r"""
 
   // Pilih arah: hanya ke lengan tujuan yang ada (simpang 3 lengan: tidak ada belok ke lengan kosong)
   function pickTurn(k) {
-    const opts = [["lurus", 1 - CFG.pKiri - CFG.pKanan], ["kiri", CFG.pKiri], ["kanan", CFG.pKanan]]
+    const opts = [["lurus", 1 - CFG.pKiri[k] - CFG.pKanan[k]], ["kiri", CFG.pKiri[k]], ["kanan", CFG.pKanan[k]]]
       .filter(o => ACTSET.has(PATHS[k][o[0]].m));
     let sum = 0; for (const o of opts) sum += o[1];
     if (sum <= 0) return opts[Math.floor(Math.random() * opts.length)][0];
@@ -436,7 +455,7 @@ _TEMPLATE_HTML = r"""
       const y = y0 + i * (rowH + 4);
       tctx.fillStyle = "#ef4444"; tctx.fillRect(x0, y, cyc * sc, rowH);
       tctx.fillStyle = "#22c55e"; tctx.fillRect(x0 + starts[i] * sc, y, G[i] * sc, rowH);
-      tctx.fillStyle = "#fbbf24"; tctx.fillRect(x0 + (starts[i] + G[i]) * sc, y, Y * sc, rowH);
+      tctx.fillStyle = "#fbbf24"; tctx.fillRect(x0 + (starts[i] + G[i]) * sc, y, Y[i] * sc, rowH);
       tctx.fillStyle = "#e5e7eb"; tctx.fillText(LBL[ACT[i]], 5, y + rowH / 2);
     }
     tctx.fillStyle = "#ffffff"; tctx.fillRect(x0 + tc * sc - 1, 2, 2, Hh - 4);
@@ -463,7 +482,8 @@ _TEMPLATE_HTML = r"""
     tb.appendChild(tr); rows[k] = tr.children;
   }
   document.getElementById("info").innerHTML =
-    "Hijau tiap fase: " + G.map(v => Math.round(v * 10) / 10).join(" / ") + " d &middot; Kuning " + Y + " d &middot; Semua merah " + AR + " d<br>" +
+    "Hijau tiap fase (" + ACT.map(k => LBL[k]).join("/") + "): " + G.map(v => Math.round(v * 10) / 10).join(" / ") + " d<br>" +
+    "Kuning: " + Y.map(v => Math.round(v * 10) / 10).join(" / ") + " d &middot; Semua merah: " + AR.map(v => Math.round(v * 10) / 10).join(" / ") + " d<br>" +
     "<b>Siklus simulasi = " + Math.round(cyc * 10) / 10 + " detik</b> (" + NP + " fase berurutan " + ACT.map(k => LBL[k]).join(" &rarr; ") + ")";
 
   const SUBTXT = { G: "HIJAU", Y: "KUNING", AR: "SEMUA MERAH" };
@@ -515,4 +535,3 @@ if __name__ == "__main__":
     with open("uji_animasi.html", "w", encoding="utf-8") as f:
         f.write(html)
     print("Tersimpan: uji_animasi.html | siklus =", hitung_waktu_siklus([35] * 4, 3, 2), "detik")
-    
