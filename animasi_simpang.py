@@ -60,10 +60,12 @@ def bangun_html_animasi(hijau, kuning, semua_merah, volume, p_kiri=0.25, p_kanan
             p_kiri      -> proporsi belok kiri (0-1): angka tunggal atau list per pendekat aktif
             p_kanan     -> proporsi belok kanan (0-1): angka tunggal atau list per pendekat aktif
             aktif       -> list kode pendekat yang ada, mis. ["U", "S", "B"] untuk simpang 3
-                           lengan. Default None = keempat lengan (U, T, S, B).
+                           lengan. Urutan list = urutan fase. Default None = U, T, S, B.
     Return: string HTML siap dipakai di streamlit.components.v1.html()
     """
-    aktif = [k for k in URUTAN_PENDEKAT if (aktif is None or k in aktif)]
+    aktif = list(URUTAN_PENDEKAT) if aktif is None else list(aktif)    # urutan list = urutan fase
+    if len(set(aktif)) != len(aktif) or any(k not in URUTAN_PENDEKAT for k in aktif):
+        raise ValueError("Daftar pendekat aktif tidak valid (kode harus U, T, S, B dan tidak boleh kembar).")
     if len(aktif) not in (3, 4):
         raise ValueError("Simpang harus memiliki 3 atau 4 lengan.")
     if len(hijau) != len(aktif):
